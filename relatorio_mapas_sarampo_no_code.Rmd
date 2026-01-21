@@ -1,0 +1,1746 @@
+---
+title: "Avaliação de Risco de Sarampo e Rubéola - Brasil"
+subtitle: "Mapas Estratégicos por Município (2020-2024)"
+date: "`r format(Sys.Date(), '%d de %B de %Y')`"
+output:
+  html_document:
+    toc: true
+    toc_float:
+      collapsed: false
+      smooth_scroll: true
+    toc_depth: 3
+    number_sections: true
+    theme: cosmo
+    code_folding: hide
+    df_print: paged
+    fig_width: 12
+    fig_height: 8
+    dpi: 300
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  fig.width = 12,
+  fig.height = 8,
+  dpi = 300
+)
+```
+
+# Apresentação
+
+Este relatório apresenta a **avaliação de risco de sarampo e rubéola** para todos os municípios brasileiros, utilizando metodologia baseada em indicadores de:
+
+- **Cobertura Vacinal** (Eixo 1)
+- **Risco de Casos/Surtos** (Eixo 2)
+- **Vigilância Epidemiológica** (Eixo 3)
+
+## Metodologia
+
+### Indicadores Avaliados
+
+**EIXO 1: COBERTURA VACINAL (VC_SCORE: 0-5 pontos)**
+- 5 indicadores binários (0 ou 1)
+
+**EIXO 2: RISCO DE CASOS (PIC_SCORE: 0-7 pontos)**
+- 1 indicador graduado (turismo: 0-3 pontos)
+- 4 indicadores binários (0 ou 1)
+
+**EIXO 3: VIGILÂNCIA (VIG_SCORE: 0-5 pontos)**
+- 5 indicadores binários (0 ou 1)
+- **Score Total:** 0 a 17 pontos
+
+### Classificação de Risco
+
+**Todos os mapas utilizam 4 categorias padronizadas:**
+
+- ✅ **Baixo risco:** Manutenção da eliminação
+- ⚠️ **Médio risco:** Monitoramento intensificado
+- 🟠 **Alto risco:** Intervenção recomendada
+- 🔴 **Altíssimo risco:** Prioridade máxima para o MS
+
+**Cortes para SCORE_TOTAL (0-17 pontos):**
+
+- 0-2: Baixo risco
+- 3-6: Médio risco
+- 7-11: Alto risco
+- 12-17: Altíssimo risco
+
+---
+
+# Preparação dos Dados
+
+```{r carregamento}
+# Pacotes
+if(!require(pacman)) install.packages("pacman")
+pacman::p_load(
+  haven,      # Ler .dta
+  dplyr,
+  tidyr,
+  sf,
+  geobr,
+  ggplot2,
+  viridis,
+  knitr,
+  kableExtra,
+  DT,
+  scales
+)
+
+# Ler base Stata
+base <- read_dta("measles_final.dta") %>%
+  # PRIMEIRO: Remover labels do haven
+  zap_labels() %>%
+  # SEGUNDO: Converter para tipos normais
+  mutate(
+    vulnerable_groups = as.character(vulnerable_groups),
+    class_rrt = as.character(class_rrt),
+    class_adeqinvest = as.character(class_adeqinvest)
+    # density_new: deixar como está (será tratado no pic_5_ind)
+  ) %>%
+  mutate(
+    # Garantir geocodigo numérico
+    geocodigo = as.numeric(cod_mun7),
+    
+    # RECRIAR density_new (que pode ser perdida no zap_labels)
+    # Densidade > 1.5 hab/km² = alta densidade (pic_5_ind = 1)
+    populacao_num = as.numeric(populacao),
+    densidade = populacao_num / reakm2domunicpio,
+    density_recriar = ifelse(!is.na(densidade) & densidade >= 1.5, 1, 0),
+    
+    # === CALCULAR SCORES A PARTIR DAS CLASSIFICAÇÕES ===
+    
+    # EIXO 1: COBERTURA VACINAL (0-5)
+    vc_1_ind = as.numeric(class_vac1),
+    vc_2_ind = as.numeric(class_vac2),
+    vc_3_ind = as.numeric(class_fhs),
+    vc_4_ind = as.numeric(class_abandono),
+    vc_5_ind = as.numeric(class_foraescola),
+    VC_SCORE = vc_1_ind + vc_2_ind + vc_3_ind + vc_4_ind + vc_5_ind,
+    
+    # EIXO 2: RISCO DE SURTOS (0-7)
+    pic_1_ind = as.numeric(class_ivs),
+    pic_2_ind = as.numeric(turismo_class_nova),  # 0-3 graduado
+    pic_3_ind = ifelse(vulnerable_groups == "yes", 1, 0),
+    pic_4_ind = ifelse(class_rrt == "1", 1, 0),
+    pic_5_ind = density_recriar,  # Recriada acima (densidade >= 1.5 hab/km²)
+    PIC_SCORE = pic_1_ind + pic_2_ind + pic_3_ind + pic_4_ind + pic_5_ind,
+    
+    # EIXO 3: VIGILÂNCIA (0-5)
+    # vig_1: Taxa de notificação inadequada
+    vig_1_ind = case_when(
+      is.na(class_notification) ~ 0,
+      class_notification == 0 ~ 1,        # Abaixo da meta = RISCO
+      class_notification == 1 ~ 0,        # Atingiu a meta = OK
+      TRUE ~ 0
+    ),
+    
+    # vig_2: Investigação não oportuna
+    vig_2_ind = case_when(
+      is.na(class_invest) ~ 0,
+      class_invest == 0 ~ 0,              # >=80% OK
+      class_invest == 1 ~ 1,              # <80% = RISCO
+      TRUE ~ 0
+    ),
+    
+    # vig_3: Coleta não oportuna
+    vig_3_ind = case_when(
+      is.na(class_sample) ~ 0,
+      class_sample == 0 ~ 0,              # >=80% OK
+      class_sample == 1 ~ 1,              # <80% = RISCO
+      TRUE ~ 0
+    ),
+    
+    # vig_4: Investigação inadequada
+    vig_4_ind = case_when(
+      is.na(class_adeqinvest) ~ 0,
+      class_adeqinvest == "0" ~ 1,        # <80% = RISCO
+      class_adeqinvest == "1" ~ 0,        # >=80% OK
+      TRUE ~ 0
+    ),
+    
+    # vig_5: Encerramento laboratorial inadequado
+    vig_5_ind = case_when(
+      is.na(class_sample2) ~ 0,
+      as.numeric(class_sample2) >= 0.8 ~ 0,  # >=80% OK
+      TRUE ~ 1                                # <80% = RISCO
+    ),
+    
+    VIG_SCORE = vig_1_ind + vig_2_ind + vig_3_ind + vig_4_ind + vig_5_ind,
+    
+    # SCORES COMBINADOS
+    SCORE_VC_PIC = VC_SCORE + PIC_SCORE,
+    SCORE_VC_VIG = VC_SCORE + VIG_SCORE,
+    SCORE_PIC_VIG = PIC_SCORE + VIG_SCORE,
+    SCORE_TOTAL = VC_SCORE + PIC_SCORE + VIG_SCORE,
+    
+    # === CLASSIFICAÇÕES (4 CATEGORIAS) ===
+    
+    classif_vc = factor(case_when(
+      VC_SCORE <= 1 ~ "Baixo risco",
+      VC_SCORE == 2 ~ "Médio risco",
+      VC_SCORE >= 3 & VC_SCORE <= 4 ~ "Alto risco",
+      VC_SCORE == 5 ~ "Altíssimo risco",
+      TRUE ~ "Altíssimo risco"
+    ), levels = c("Baixo risco", "Médio risco", "Alto risco", "Altíssimo risco")),
+    
+    classif_pic = factor(case_when(
+      PIC_SCORE <= 1 ~ "Baixo risco",
+      PIC_SCORE <= 3 ~ "Médio risco",
+      PIC_SCORE <= 5 ~ "Alto risco",
+      TRUE ~ "Altíssimo risco"
+    ), levels = c("Baixo risco", "Médio risco", "Alto risco", "Altíssimo risco")),
+    
+    classif_vig = factor(case_when(
+      # SEM NOTIFICAÇÕES = NÃO CLASSIFICÁVEL (aparece como CINZA no mapa)
+      is.na(suspeitos_sarampo) | suspeitos_sarampo == 0 ~ NA_character_,
+      # COM NOTIFICAÇÕES: classificar por VIG_SCORE
+      VIG_SCORE <= 1 ~ "Baixo risco",
+      VIG_SCORE == 2 ~ "Médio risco",
+      VIG_SCORE == 3 ~ "Alto risco",
+      VIG_SCORE == 4 ~ "Altíssimo risco",
+      TRUE ~ "Altíssimo risco"  # Fallback (score >4, se existir)
+    ), levels = c("Baixo risco", "Médio risco", "Alto risco", "Altíssimo risco")),
+    
+    classif_vc_pic = factor(case_when(
+      SCORE_VC_PIC <= 3 ~ "Baixo risco",
+      SCORE_VC_PIC <= 6 ~ "Médio risco",
+      SCORE_VC_PIC <= 9 ~ "Alto risco",
+      TRUE ~ "Altíssimo risco"
+    ), levels = c("Baixo risco", "Médio risco", "Alto risco", "Altíssimo risco")),
+    
+    classif_vc_vig = factor(case_when(
+      SCORE_VC_VIG <= 2 ~ "Baixo risco",
+      SCORE_VC_VIG <= 5 ~ "Médio risco",
+      SCORE_VC_VIG <= 8 ~ "Alto risco",
+      TRUE ~ "Altíssimo risco"
+    ), levels = c("Baixo risco", "Médio risco", "Alto risco", "Altíssimo risco")),
+    
+    classif_pic_vig = factor(case_when(
+      SCORE_PIC_VIG <= 3 ~ "Baixo risco",
+      SCORE_PIC_VIG <= 6 ~ "Médio risco",
+      SCORE_PIC_VIG <= 9 ~ "Alto risco",
+      TRUE ~ "Altíssimo risco"
+    ), levels = c("Baixo risco", "Médio risco", "Alto risco", "Altíssimo risco")),
+    
+    classif_total = factor(case_when(
+      SCORE_TOTAL <= 2 ~ "Baixo risco",
+      SCORE_TOTAL <= 6 ~ "Médio risco",
+      SCORE_TOTAL <= 11 ~ "Alto risco",
+      TRUE ~ "Altíssimo risco"
+    ), levels = c("Baixo risco", "Médio risco", "Alto risco", "Altíssimo risco")),
+    
+    # SILÊNCIO EPIDEMIOLÓGICO (para Mapa 9)
+    # Municípios SEM notificações E com fatores de risco
+    tem_notificacao = !is.na(suspeitos_sarampo) & suspeitos_sarampo > 0,
+    
+    silencio_epi = case_when(
+      # Tem notificação = NÃO está em silêncio
+      tem_notificacao ~ NA_character_,
+      # Sem notificação + turismo = Silêncio com risco ALTO
+      turismo_class_nova >= 1 ~ "Silêncio + Turismo",
+      # Sem notificação + vulnerabilidade alta = Silêncio com risco
+      pic_1_ind == 1 ~ "Silêncio + Vulnerabilidade",
+      # Sem notificação + grupos vulneráveis = Silêncio com risco
+      pic_3_ind == 1 ~ "Silêncio + Grupos Vulneráveis",
+      # Sem notificação mas sem fatores adicionais = Silêncio simples
+      TRUE ~ "Silêncio Simples"
+    )
+  )
+
+cat("✓ Base carregada:", nrow(base), "municípios\n")
+cat("✓ Scores calculados\n")
+cat("✓ Classificações criadas\n")
+```
+
+```{r shapefile}
+# Carregar shapefile local
+cat("Carregando shapefile local...\n")
+
+# Opções de caminho relativo
+caminhos_possiveis <- c(
+  "Data/shapefiles/admin2.shp",        # Se RMD está em src/
+  "../Data/shapefiles/admin2.shp",     # Se RMD está em subpasta
+  "../../Data/shapefiles/admin2.shp",  # Se RMD está 2 níveis abaixo
+  "admin2.shp",                         # Se está na mesma pasta
+  "shapefiles/admin2.shp"              # Se shapefiles está junto
+)
+
+shapefile_path <- NULL
+
+for(caminho in caminhos_possiveis) {
+  if(file.exists(caminho)) {
+    shapefile_path <- caminho
+    cat("  ✓ Shapefile encontrado:", caminho, "\n")
+    break
+  }
+}
+
+if(is.null(shapefile_path)) {
+  cat("\n❌ Shapefile não encontrado!\n")
+  cat("Working directory atual:", getwd(), "\n")
+  cat("Arquivos disponíveis:\n")
+  print(list.files(recursive = TRUE, pattern = "\\.shp$"))
+  stop("Copie admin2.shp para a pasta do RMD ou ajuste o caminho.")
+}
+
+# Ler shapefile
+muni_sf <- st_read(shapefile_path, quiet = TRUE)
+
+# Identificar coluna de código do município
+codigo_col <- NULL
+colunas_disponiveis <- names(muni_sf)
+
+cat("  Colunas no shapefile:", paste(colunas_disponiveis[1:min(10, length(colunas_disponiveis))], collapse=", "), "\n\n")
+
+# Padrões para procurar (em ordem de prioridade)
+padroes <- c(
+  "^GEO_ID$",              # Shapefile admin2 ⭐
+  "^cod_muni7$",           # Exato
+  "^cod_mun7$",            # Variação
+  "^geocodigo$",           # Geocódigo
+  "^geocod$",              # Geocod
+  "cod.*mun.*7",           # Contém cod, mun e 7
+  "ibge.*7",               # IBGE com 7
+  "admin.*id",             # Admin ID
+  "admin2.*id",            # Admin2 ID
+  "cd_mun",                # Código município
+  "codmun7",               # Sem underscore
+  "code_muni"              # geobr
+)
+
+for(padrao in padroes) {
+  matches <- grep(padrao, colunas_disponiveis, ignore.case = TRUE, value = TRUE)
+  if(length(matches) > 0) {
+    codigo_col <- matches[1]
+    cat("  ✓ Coluna identificada:", codigo_col, "(padrão:", padrao, ")\n")
+    break
+  }
+}
+
+if(is.null(codigo_col)) {
+  cat("\n❌ Nenhuma coluna identificada automaticamente!\n")
+  cat("\n📋 Colunas disponíveis no shapefile:\n")
+  for(i in seq_along(colunas_disponiveis)) {
+    cat(sprintf("  %2d. %s\n", i, colunas_disponiveis[i]))
+  }
+  cat("\n💡 Dica: Procure uma coluna com código IBGE de 7 dígitos\n")
+  cat("    Exemplos: GEO_ID, cod_muni7, geocodigo, cd_mun\n\n")
+  stop("Identifique manualmente a coluna e edite o RMD na linha do codigo_col.")
+}
+
+# Criar geocodigo
+muni_sf <- muni_sf %>%
+  mutate(geocodigo = as.numeric(as.character(.data[[codigo_col]])))
+
+cat("✓ Shapefile carregado:", nrow(muni_sf), "polígonos\n")
+cat("  Primeiros geocódigos:", paste(head(muni_sf$geocodigo, 3), collapse=", "), "\n")
+
+
+state_sf <- read_state (year = 2020)
+
+```
+
+```{r merge}
+# Merge
+mapa_dados <- muni_sf %>%
+  left_join(base, by = "geocodigo")
+
+# Diagnóstico
+n_total <- nrow(mapa_dados)
+n_com_dados <- sum(!is.na(mapa_dados$SCORE_TOTAL))
+
+cat("✓ Merge realizado\n")
+cat("  Municípios totais:", n_total, "\n")
+cat("  Municípios com dados:", n_com_dados, "\n")
+cat("  Pareamento:", round(n_com_dados/n_total*100, 1), "%\n\n")
+
+if(n_com_dados == 0) {
+  stop("❌ ERRO: Nenhum município foi pareado! Verifique geocodigos.")
+}
+
+# Validar distribuição
+print(table(mapa_dados$classif_total, useNA = "ifany"))
+```
+
+```{r cores}
+# Paleta de cores (4 categorias + Silêncio Epidemiológico)
+cores_risco <- c(
+  "Baixo risco" = "#27AE60",              # Verde
+  "Médio risco" = "#FFD700",              # Amarelo/Âmbar
+  "Alto risco" = "#E67E22",               # Laranja
+  "Altíssimo risco" = "#C0392B"           # Vermelho
+)
+
+# Paleta específica para VIG (inclui Silêncio)
+cores_vig <- c(
+  "Baixo risco" = "#27AE60",              # Verde
+  "Médio risco" = "#FFD700",              # Amarelo/Âmbar
+  "Alto risco" = "#E67E22",               # Laranja
+  "Altíssimo risco" = "#C0392B"           # Vermelho
+)
+```
+
+---
+
+# Resumo Executivo {.tabset}
+
+## Estatísticas Descritivas
+
+```{r resumo_stats}
+resumo <- base %>%
+  summarise(
+    `Média VC_SCORE` = round(mean(VC_SCORE, na.rm=TRUE), 2),
+    `Média PIC_SCORE` = round(mean(PIC_SCORE, na.rm=TRUE), 2),
+    `Média VIG_SCORE` = round(mean(VIG_SCORE, na.rm=TRUE), 2),
+    `Média SCORE_TOTAL` = round(mean(SCORE_TOTAL, na.rm=TRUE), 2),
+    `Max SCORE_TOTAL` = max(SCORE_TOTAL, na.rm=TRUE)
+  )
+
+kable(resumo,
+      caption = "Estatísticas Descritivas dos Scores") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE)
+```
+
+## Distribuição por Categoria
+
+```{r resumo_dist}
+dist_risco <- base %>%
+  group_by(classif_total) %>%
+  summarise(N_Municipios = n(), .groups = "drop") %>%
+  mutate(`% Total` = round(N_Municipios / sum(N_Municipios) * 100, 1))
+
+kable(dist_risco,
+      col.names = c("Categoria de Risco", "Nº Municípios", "% Total"),
+      caption = "Distribuição de Municípios por Categoria de Risco (SCORE_TOTAL)") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE) %>%
+  column_spec(1, bold = TRUE) %>%
+  row_spec(which(dist_risco$classif_total == "Altíssimo risco"), 
+           background = "#FADBD8", bold = TRUE)
+```
+
+## Histograma
+
+```{r histograma}
+ggplot(base, aes(x = SCORE_TOTAL)) +
+  geom_histogram(binwidth = 1, fill = "#3498DB", color = "white", alpha = 0.8) +
+  labs(
+    title = "Distribuição do SCORE_TOTAL",
+    x = "Score Total (0-17 pontos)",
+    y = "Número de Municípios"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+```
+
+## Top 20 Municípios
+
+```{r top20}
+top20 <- base %>%
+  arrange(desc(SCORE_TOTAL)) %>%
+  select(nome_municipio, UF, SCORE_TOTAL, VC_SCORE, PIC_SCORE, VIG_SCORE, 
+         populacao, classif_total) %>%
+  head(20)
+
+datatable(
+  top20,
+  colnames = c("Município", "UF", "Score Total", "VC", "PIC", "VIG", 
+               "População", "Classificação"),
+  options = list(
+    pageLength = 20,
+    dom = 't',
+    ordering = FALSE
+  ),
+  rownames = FALSE
+) %>%
+  formatRound(columns = "populacao", digits = 0, mark = ".") %>%
+  formatStyle(
+    'SCORE_TOTAL',
+    backgroundColor = styleInterval(c(2, 6, 11), 
+                                    c('#27AE60', '#FFD700', '#E67E22', '#C0392B')),
+    fontWeight = 'bold',
+    color = 'white'
+  )
+```
+
+---
+
+# Mapas Estratégicos {.tabset}
+
+## Mapa 1: Cobertura Vacinal
+
+```{r mapa1_vc, fig.width=12, fig.height=10}
+ggplot() +
+  geom_sf(data = mapa_dados, aes(fill = classif_vc), color = NA, size = 0.1) +
+  geom_sf(data = state_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_manual(
+    values = cores_risco,
+    name = "Classificação",
+    na.value = "grey90"
+  ) +
+  labs(
+    title = "Mapa 1: Risco de Cobertura Vacinal",
+    subtitle = "VC_SCORE (0-5 pontos) | Cobertura D1, D2, APS, Abandono, Fora da escola",
+    caption = "Fonte: Dados do Ministério da Saúde | Elaboração própria"
+  ) +
+  theme_void(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, margin = margin(t = 10))
+  )
+```
+
+**Distribuição:**
+```{r tab1}
+kable(table(base$classif_vc), col.names = c("Classificação", "N"))
+```
+
+## Mapa 2: Risco de Casos/Surtos
+
+```{r mapa2_pic, fig.width=12, fig.height=10}
+ggplot() +
+  geom_sf(data = mapa_dados, aes(fill = classif_pic), color = NA, size = 0.1) +
+  geom_sf(data = state_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_manual(
+    values = cores_risco,
+    name = "Classificação",
+    na.value = "grey90"
+  ) +
+  labs(
+    title = "Mapa 2: Risco de Casos/Surtos",
+    subtitle = "PIC_SCORE (0-7 pontos) | IVS, Turismo, Grupos vulneráveis, RRT, Densidade",
+    caption = "Fonte: Dados do Ministério da Saúde | Elaboração própria"
+  ) +
+  theme_void(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, margin = margin(t = 10))
+  )
+```
+
+**Distribuição:**
+```{r tab2}
+kable(table(base$classif_pic), col.names = c("Classificação", "N"))
+```
+
+## Mapa 3: Vigilância Epidemiológica
+
+```{r mapa3_vig, fig.width=12, fig.height=10}
+ggplot() +
+  geom_sf(data = mapa_dados, aes(fill = classif_vig), color = NA, size = 0.1) +
+  geom_sf(data = state_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_manual(
+    values = cores_vig,  # <-- CORES ESPECÍFICAS PARA VIG
+    name = "Classificação",
+    na.value = "grey90"
+  ) +
+  labs(
+    title = "Mapa 3: Risco de Vigilância Epidemiológica",
+    subtitle = "VIG_SCORE (0-4 pontos) | Taxa notificação, Investigação oportuna, Coleta oportuna, Investigação adequada, Encerramento laboratorial | CINZA = Sem notificações",
+    caption = "Fonte: Dados do Ministério da Saúde | Elaboração própria"
+  ) +
+  theme_void(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, margin = margin(t = 10))
+  )
+```
+
+**Distribuição:**
+```{r tab3}
+vig_com_dados <- base %>%
+  filter(tem_notificacao) %>%
+  count(classif_vig) %>%
+  arrange(classif_vig)
+
+vig_sem_dados <- base %>%
+  filter(!tem_notificacao) %>%
+  summarise(n = n()) %>%
+  mutate(classif_vig = "Sem notificações (não classificável)")
+
+# Combinar
+vig_dist <- bind_rows(vig_com_dados, vig_sem_dados) %>%
+  mutate(
+    `% Total` = round(n / sum(n) * 100, 1)
+  )
+
+kable(vig_dist, 
+      col.names = c("Classificação", "Nº Municípios", "% Total"),
+      caption = "Distribuição de Municípios por Qualidade da Vigilância")
+```
+
+**Nota importante:** Municípios **sem notificações** aparecem em **CINZA** no mapa (não classificáveis). Ver **Mapa 9** para análise específica do silêncio epidemiológico.
+
+
+## Mapa 4: VC + PIC
+
+```{r mapa4, fig.width=12, fig.height=10}
+ggplot() +
+  geom_sf(data = mapa_dados, aes(fill = classif_vc_pic), color = NA, size = 0.1) +
+  geom_sf(data = state_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_manual(
+    values = cores_risco,
+    name = "Classificação",
+    na.value = "grey90"
+  ) +
+  labs(
+    title = "Mapa 4: Cobertura Vacinal + Risco de Casos/Surtos",
+    subtitle = "SCORE_VC_PIC (0-12 pontos)",
+    caption = "Fonte: Dados do Ministério da Saúde | Elaboração própria"
+  ) +
+  theme_void(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, margin = margin(t = 10))
+  )
+```
+
+**Distribuição:**
+```{r tab4}
+kable(table(base$classif_vc_pic), col.names = c("Classificação", "N"))
+```
+
+## Mapa 5: VC + VIG
+
+```{r mapa5, fig.width=12, fig.height=10}
+ggplot() +
+  geom_sf(data = mapa_dados, aes(fill = classif_vc_vig), color = NA, size = 0.1) +
+  geom_sf(data = state_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_manual(
+    values = cores_risco,
+    name = "Classificação",
+    na.value = "grey90"
+  ) +
+  labs(
+    title = "Mapa 5: Cobertura Vacinal + Vigilância",
+    subtitle = "SCORE_VC_VIG (0-10 pontos)",
+    caption = "Fonte: Dados do Ministério da Saúde | Elaboração própria"
+  ) +
+  theme_void(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, margin = margin(t = 10))
+  )
+```
+
+**Distribuição:**
+```{r tab5}
+kable(table(base$classif_vc_vig), col.names = c("Classificação", "N"))
+```
+
+## Mapa 6: PIC + VIG
+
+```{r mapa6, fig.width=12, fig.height=10}
+ggplot() +
+  geom_sf(data = mapa_dados, aes(fill = classif_pic_vig), color = NA, size = 0.1) +
+  geom_sf(data = state_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_manual(
+    values = cores_risco,
+    name = "Classificação",
+    na.value = "grey90"
+  ) +
+  labs(
+    title = "Mapa 6: Risco de Casos/Surtos + Vigilância",
+    subtitle = "SCORE_PIC_VIG (0-12 pontos)",
+    caption = "Fonte: Dados do Ministério da Saúde | Elaboração própria"
+  ) +
+  theme_void(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, margin = margin(t = 10))
+  )
+```
+
+**Distribuição:**
+```{r tab6}
+kable(table(base$classif_pic_vig), col.names = c("Classificação", "N"))
+```
+
+## ⭐ Mapa 7: SCORE TOTAL
+
+```{r mapa7_total, fig.width=12, fig.height=10}
+ggplot() +
+  geom_sf(data = mapa_dados, aes(fill = classif_total), color = NA, size = 0.1) +
+  geom_sf(data = state_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_manual(
+    values = cores_risco,
+    name = "Classificação",
+    na.value = "grey90"
+  ) +
+  labs(
+    title = "Mapa 7: SCORE TOTAL - Síntese Geral",
+    subtitle = "SCORE_TOTAL (0-17 pontos) | VC + PIC + VIG",
+    caption = "Fonte: Dados do Ministério da Saúde | Elaboração própria"
+  ) +
+  theme_void(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, margin = margin(t = 10))
+  )
+```
+
+**Distribuição:**
+```{r tab7}
+kable(table(base$classif_total), col.names = c("Classificação", "N"))
+```
+
+## Mapa 8: Top 200 Municípios
+
+```{r mapa8_top200, fig.width=12, fig.height=10}
+top_200_codes <- base %>%
+  arrange(desc(SCORE_TOTAL)) %>%
+  head(200) %>%
+  pull(geocodigo)
+
+mapa_dados_top <- mapa_dados %>%
+  mutate(e_top200 = ifelse(geocodigo %in% top_200_codes, "Top 200", "Outros"))
+
+ggplot() +
+  geom_sf(data = mapa_dados_top, aes(fill = e_top200), color = NA, size = 0.1) +
+  geom_sf(data = state_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_manual(
+    values = c("Top 200" = "#C0392B", "Outros" = "grey90"),
+    name = ""
+  ) +
+  labs(
+    title = "Mapa 8: Top 200 Municípios Prioritários",
+    subtitle = "Municípios com maiores SCORE_TOTAL (prioridade máxima para intervenção)",
+    caption = "Fonte: Dados do Ministério da Saúde | Elaboração própria"
+  ) +
+  theme_void(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, margin = margin(t = 10))
+  )
+```
+
+## Mapa 9: Silêncio Epidemiológico
+
+```{r mapa9_silent, fig.width=12, fig.height=10}
+# Cores para silêncio epidemiológico
+cores_silencio <- c(
+  "Silêncio + Turismo" = "#C0392B",              # Vermelho escuro
+  "Silêncio + Vulnerabilidade" = "#E74C3C",      # Vermelho
+  "Silêncio + Grupos Vulneráveis" = "#E67E22",   # Laranja
+  "Silêncio Simples" = "#FFD700"                 # Amarelo
+)
+
+ggplot() +
+  geom_sf(data = mapa_dados, aes(fill = silencio_epi), color = NA, size = 0.1) +
+  geom_sf(data = state_sf, fill = NA, color = "black", size = 0.5) +
+  scale_fill_manual(
+    values = cores_silencio,
+    name = "Tipo de Silêncio",
+    na.value = "grey95"  # Municípios COM notificação = cinza claro
+  ) +
+  labs(
+    title = "Mapa 9: Silêncio Epidemiológico com Fatores de Risco",
+    subtitle = "Municípios SEM notificações de casos suspeitos + fatores que aumentam preocupação",
+    caption = "Fonte: Dados do Ministério da Saúde | Elaboração própria\nMunicípios em cinza TÊM notificações (não estão em silêncio)"
+  ) +
+  theme_void(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", size = 16, hjust = 0.5),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, margin = margin(b = 10)),
+    legend.position = "bottom",
+    legend.title = element_text(face = "bold"),
+    plot.caption = element_text(hjust = 0, margin = margin(t = 10), size = 9)
+  )
+```
+
+**Distribuição:**
+```{r tab9}
+silent_dist <- base %>%
+  filter(!tem_notificacao) %>%  # Só os em silêncio
+  count(silencio_epi) %>%
+  arrange(desc(n))
+
+kable(silent_dist, 
+      col.names = c("Tipo de Silêncio", "Nº Municípios"),
+      caption = "Municípios em Silêncio Epidemiológico por Tipo de Risco Adicional")
+```
+
+**Interpretação:**
+
+- **Silêncio + Turismo:** Municípios sem notificações mas com fluxo turístico (maior risco de importação)
+- **Silêncio + Vulnerabilidade:** Municípios sem notificações + alta vulnerabilidade social (menor acesso)
+- **Silêncio + Grupos Vulneráveis:** Municípios sem notificações + populações indígenas/quilombolas
+- **Silêncio Simples:** Municípios sem notificações e sem fatores adicionais de risco
+
+**Ação recomendada:** Todos os municípios em silêncio requerem investigação ativa (busca em prontuários, capacitação profissional), mas aqueles com fatores de risco adicionais são **PRIORIDADE MÁXIMA**.
+
+
+---
+
+# Análise Regional {.tabset}
+
+## Scores Médios por Região
+
+```{r regional}
+regional <- base %>%
+  group_by(macrorregiao) %>%
+  summarise(
+    N = n(),
+    `VC médio` = round(mean(VC_SCORE, na.rm=TRUE), 2),
+    `PIC médio` = round(mean(PIC_SCORE, na.rm=TRUE), 2),
+    `VIG médio` = round(mean(VIG_SCORE, na.rm=TRUE), 2),
+    `TOTAL médio` = round(mean(SCORE_TOTAL, na.rm=TRUE), 2),
+    .groups = "drop"
+  ) %>%
+  arrange(desc(`TOTAL médio`))
+
+kable(regional,
+      col.names = c("Região", "N Municípios", "VC", "PIC", "VIG", "Total"),
+      caption = "Scores médios por macrorregião") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE) %>%
+  column_spec(1, bold = TRUE)
+```
+
+## Distribuição por Região
+
+```{r regional_dist}
+regional_dist <- base %>%
+  group_by(macrorregiao, classif_total) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(macrorregiao) %>%
+  mutate(pct = round(n / sum(n) * 100, 1))
+
+ggplot(regional_dist, aes(x = macrorregiao, y = pct, fill = classif_total)) +
+  geom_col(position = "stack") +
+  scale_fill_manual(values = cores_risco, name = "Classificação") +
+  labs(
+    title = "Distribuição de Risco por Macrorregião",
+    x = "Macrorregião",
+    y = "Percentual (%)"
+  ) +
+  theme_minimal(base_size = 14) +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+```
+
+---
+
+# Tabelas Completas por Mapa {.tabset}
+
+Esta seção apresenta tabelas interativas com **todos os municípios** para cada mapa estratégico.
+
+## Tabela 1: Cobertura Vacinal
+
+```{r tabela_vc}
+tab_vc <- base %>%
+  select(
+    nome_municipio, UF, macrorregiao, populacao,
+    vc_1_ind, vc_2_ind, vc_3_ind, vc_4_ind, vc_5_ind,
+    VC_SCORE, classif_vc
+  ) %>%
+  arrange(desc(VC_SCORE), nome_municipio)
+
+datatable(
+  tab_vc,
+  colnames = c(
+    "Município", "UF", "Região", "População",
+    "D1<95%", "D2<95%", "APS", "Abandono", "Fora Escola",
+    "Score VC", "Classificação"
+  ),
+  caption = "Tabela Completa: Cobertura Vacinal (5.570 municípios)",
+  options = list(
+    pageLength = 25,
+    dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf'),
+    scrollX = TRUE,
+    order = list(list(9, 'desc'))  # Ordenar por VC_SCORE
+  ),
+  extensions = 'Buttons',
+  rownames = FALSE,
+  filter = 'top'
+) %>%
+  formatRound(columns = "populacao", digits = 0, mark = ".") %>%
+  formatStyle(
+    'VC_SCORE',
+    backgroundColor = styleInterval(c(1, 2, 4), 
+                                    c('#27AE60', '#FFD700', '#E67E22', '#C0392B')),
+    fontWeight = 'bold',
+    color = 'white'
+  ) %>%
+  formatStyle(
+    'classif_vc',
+    backgroundColor = styleEqual(
+      c("Baixo risco", "Médio risco", "Alto risco", "Altíssimo risco"),
+      c('#27AE60', '#FFD700', '#E67E22', '#C0392B')
+    ),
+    color = 'white',
+    fontWeight = 'bold'
+  )
+```
+
+## Tabela 2: Risco de Casos/Surtos
+
+```{r tabela_pic}
+tab_pic <- base %>%
+  select(
+    nome_municipio, UF, macrorregiao, populacao,
+    pic_1_ind, pic_2_ind, pic_3_ind, pic_4_ind, pic_5_ind,
+    PIC_SCORE, classif_pic
+  ) %>%
+  arrange(desc(PIC_SCORE), nome_municipio)
+
+datatable(
+  tab_pic,
+  colnames = c(
+    "Município", "UF", "Região", "População",
+    "IVS", "Turismo", "Vulneráveis", "RRT", "Densidade",
+    "Score PO", "Classificação"
+  ),
+  caption = "Tabela Completa: Risco de Casos/Surtos (5.570 municípios)",
+  options = list(
+    pageLength = 25,
+    dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf'),
+    scrollX = TRUE,
+    order = list(list(9, 'desc'))
+  ),
+  extensions = 'Buttons',
+  rownames = FALSE,
+  filter = 'top'
+) %>%
+  formatRound(columns = "populacao", digits = 0, mark = ".") %>%
+  formatStyle(
+    'PIC_SCORE',
+    backgroundColor = styleInterval(c(1, 3, 5), 
+                                    c('#27AE60', '#FFD700', '#E67E22', '#C0392B')),
+    fontWeight = 'bold',
+    color = 'white'
+  ) %>%
+  formatStyle(
+    'classif_pic',
+    backgroundColor = styleEqual(
+      c("Baixo risco", "Médio risco", "Alto risco", "Altíssimo risco"),
+      c('#27AE60', '#FFD700', '#E67E22', '#C0392B')
+    ),
+    color = 'white',
+    fontWeight = 'bold'
+  )
+```
+
+## Tabela 3: Vigilância Epidemiológica
+
+```{r tabela_vig}
+tab_vig <- base %>%
+  select(
+    nome_municipio, UF, macrorregiao, populacao,
+    vig_1_ind, vig_2_ind, vig_3_ind, vig_4_ind, vig_5_ind,
+    VIG_SCORE, classif_vig
+  ) %>%
+  arrange(desc(VIG_SCORE), nome_municipio)
+
+datatable(
+  tab_vig,
+  colnames = c(
+    "Município", "UF", "Região", "População",
+    "Silêncio", "Investigação oportuna", "Coleta", "Investigação não adequada",
+    "Score VIG", "Classificação"
+  ),
+  caption = "Tabela Completa: Vigilância Epidemiológica (5.570 municípios)",
+  options = list(
+    pageLength = 25,
+    dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf'),
+    scrollX = TRUE,
+    order = list(list(8, 'desc'))
+  ),
+  extensions = 'Buttons',
+  rownames = FALSE,
+  filter = 'top'
+) %>%
+  formatRound(columns = "populacao", digits = 0, mark = ".") %>%
+  formatStyle(
+    'VIG_SCORE',
+    backgroundColor = styleInterval(c(1, 2, 4), 
+                                    c('#27AE60', '#FFD700', '#E67E22', '#C0392B')),
+    fontWeight = 'bold',
+    color = 'white'
+  ) %>%
+  formatStyle(
+    'classif_vig',
+    backgroundColor = styleEqual(
+      c("Baixo risco", "Médio risco", "Alto risco", "Altíssimo risco"),
+      c('#27AE60', '#FFD700', '#E67E22', '#C0392B')
+    ),
+    color = 'white',
+    fontWeight = 'bold'
+  )
+```
+
+## ⭐ Tabela 7: SCORE TOTAL
+
+```{r tabela_total}
+tab_total <- base %>%
+  select(
+    nome_municipio, UF, macrorregiao, populacao,
+    VC_SCORE, PIC_SCORE, VIG_SCORE, SCORE_TOTAL,
+    classif_total
+  ) %>%
+  arrange(desc(SCORE_TOTAL), nome_municipio)
+
+datatable(
+  tab_total,
+  colnames = c(
+    "Município", "UF", "Região", "População",
+    "VC", "PIC", "VIG", "TOTAL",
+    "Classificação"
+  ),
+  caption = "Tabela Completa: SCORE TOTAL - Todos os municípios (5.570)",
+  options = list(
+    pageLength = 50,
+    dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf'),
+    scrollX = TRUE,
+    order = list(list(7, 'desc'))  # SCORE_TOTAL
+  ),
+  extensions = 'Buttons',
+  rownames = FALSE,
+  filter = 'top'
+) %>%
+  formatRound(columns = "populacao", digits = 0, mark = ".") %>%
+  formatStyle(
+    'SCORE_TOTAL',
+    backgroundColor = styleInterval(c(2, 6, 11), 
+                                    c('#27AE60', '#FFD700', '#E67E22', '#C0392B')),
+    fontWeight = 'bold',
+    color = 'white'
+  ) %>%
+  formatStyle(
+    'classif_total',
+    backgroundColor = styleEqual(
+      c("Baixo risco", "Médio risco", "Alto risco", "Altíssimo risco"),
+      c('#27AE60', '#FFD700', '#E67E22', '#C0392B')
+    ),
+    color = 'white',
+    fontWeight = 'bold'
+  )
+```
+
+## Tabela Combinada: Todos os Indicadores
+
+```{r tabela_completa}
+tab_completa <- base %>%
+  select(
+    nome_municipio, UF, macrorregiao, populacao,
+    # VC
+    vc_1_ind, vc_2_ind, vc_3_ind, vc_4_ind, vc_5_ind, VC_SCORE,
+    # PIC
+    pic_1_ind, pic_2_ind, pic_3_ind, pic_4_ind, pic_5_ind, PIC_SCORE,
+    # VIG
+    vig_1_ind, vig_2_ind, vig_3_ind, vig_4_ind, vig_5_ind, VIG_SCORE,
+    # Total
+    SCORE_TOTAL, classif_total
+  ) %>%
+  arrange(desc(SCORE_TOTAL), nome_municipio)
+
+datatable(
+  tab_completa,
+  caption = "Tabela Completa: TODOS os Indicadores (5.570 municípios)",
+  options = list(
+    pageLength = 25,
+    dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel', 'pdf'),
+    scrollX = TRUE,
+    scrollY = "500px",
+    order = list(list(21, 'desc'))  # SCORE_TOTAL
+  ),
+  extensions = 'Buttons',
+  rownames = FALSE,
+  filter = 'top'
+) %>%
+  formatRound(columns = "populacao", digits = 0, mark = ".") %>%
+  formatStyle(
+    'SCORE_TOTAL',
+    backgroundColor = styleInterval(c(2, 6, 11), 
+                                    c('#27AE60', '#FFD700', '#E67E22', '#C0392B')),
+    fontWeight = 'bold',
+    color = 'white'
+  )
+```
+
+---
+
+# Municípios Prioritários
+
+```{r top200_full}
+top200_full <- base %>%
+  arrange(desc(SCORE_TOTAL)) %>%
+  select(nome_municipio, UF, macrorregiao, SCORE_TOTAL, VC_SCORE, PIC_SCORE, VIG_SCORE, 
+         populacao, classif_total) %>%
+  head(200)
+
+datatable(
+  top200_full,
+  colnames = c("Município", "UF", "Região", "Score Total", "VC", "PIC", "VIG", 
+               "População", "Classificação"),
+  caption = "Top 200 Municípios Prioritários (ordem decrescente de SCORE_TOTAL)",
+  options = list(
+    pageLength = 25,
+    dom = 'Bfrtip',
+    buttons = c('copy', 'csv', 'excel'),
+    scrollX = TRUE
+  ),
+  extensions = 'Buttons',
+  rownames = FALSE,
+  filter = 'top'
+) %>%
+  formatRound(columns = "populacao", digits = 0, mark = ".") %>%
+  formatStyle(
+    'SCORE_TOTAL',
+    backgroundColor = styleInterval(c(2, 6, 11), 
+                                    c('#27AE60', '#FFD700', '#E67E22', '#C0392B')),
+    fontWeight = 'bold',
+    color = 'white'
+  )
+```
+
+---
+
+# Conclusões e Recomendações
+
+## Principais Achados
+
+Com base na análise dos dados de 5.570 municípios brasileiros:
+
+### Por Eixo de Avaliação
+
+**1. Cobertura Vacinal (VC_SCORE)**
+- Identifica municípios com baixa cobertura de D1 e D2
+- Avalia capacidade da APS e abandono vacinal
+- Considera população fora da escola
+
+**2. Risco de Surto (PIC_SCORE)**
+- Municípios turísticos apresentam maior risco
+- IVS alto correlaciona com vulnerabilidade
+- Densidade populacional é fator de risco
+
+**3. Vigilância Epidemiológica (VIG_SCORE)**
+- Silêncio epidemiológico preocupante
+- Necessidade de melhorar investigação oportuna
+- Qualidade da investigação precisa ser fortalecida
+
+## Recomendações Operacionais
+
+### Para Municípios de Alto e Altíssimo Risco
+
+1. **Intensificação vacinal** em áreas com baixa cobertura
+2. **Busca ativa** de não vacinados
+3. **Fortalecimento da vigilância** epidemiológica
+4. **Capacitação** de equipes locais
+5. **Monitoramento** mensal de indicadores
+
+### Para Municípios Turísticos
+
+1. **Barreiras sanitárias** em pontos de entrada
+2. **Campanhas** específicas para visitantes
+3. **Parcerias** com setor turístico
+4. **Comunicação de risco** direcionada
+
+### Para Municípios em Silêncio Epidemiológico
+
+1. **Investigação** de subnotificação
+2. **Sensibilização** de profissionais de saúde
+3. **Melhoria** de sistemas de informação
+4. **Feedback** regular sobre notificações
+
+---
+
+# Metodologia - Apêndice
+
+## Tabela Completa de Indicadores
+
+```{r metodologia}
+metod <- data.frame(
+  Eixo = c(rep("VC (0-5)", 5), rep("PIC (0-7)", 5), rep("VIG (0-5)", 5)),
+  Indicador = c(
+    "vc_1: Cobertura D1 <95%",
+    "vc_2: Cobertura D2 <95%", 
+    "vc_3: Cobertura APS baixa",
+    "vc_4: Taxa abandono alta",
+    "vc_5: % fora escola alta",
+    "pic_1: IVS alto",
+    "pic_2: Município turístico (0-3)",
+    "pic_3: Grupos vulneráveis",
+    "pic_4: Sem RRT",
+    "pic_5: Alta densidade",
+    "vig_1: Silêncio epidemiológico",
+    "vig_2: Investigação não oportuna",
+    "vig_3: Coleta não oportuna",
+    "vig_4: Investigação não adequada",
+    "vig_5: Sem exame laboratorial"
+  ),
+  Pontos = c(1,1,1,1,1, 1,"0-3",1,1,1, 1,1,1,1,1)
+)
+
+kable(metod,
+      caption = "Indicadores de Risco - Detalhamento Completo") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"),
+                full_width = FALSE) %>%
+  column_spec(1, bold = TRUE, width = "15%") %>%
+  column_spec(2, width = "70%") %>%
+  column_spec(3, width = "15%", bold = TRUE)
+```
+
+## Fontes de Dados
+
+- **Cobertura Vacinal:** SI-PNI (Sistema de Informações do Programa Nacional de Imunizações)
+- **Vigilância:** SINAN (Sistema de Informação de Agravos de Notificação)
+- **Turismo:** MTUR (Ministério do Turismo)
+- **População:** IBGE (Instituto Brasileiro de Geografia e Estatística)
+- **IVS:** IPEA (Instituto de Pesquisa Econômica Aplicada)
+
+## Período de Referência
+
+Dados consolidados do período **2020-2024**.
+
+## Classificação de Risco
+
+| Score Total | Classificação | Interpretação |
+|-------------|---------------|---------------|
+| 0-2 | Baixo risco | Manutenção da eliminação |
+| 3-6 | Médio risco | Monitoramento intensificado |
+| 7-11 | Alto risco | Intervenção recomendada |
+| 12-17 | Altíssimo risco | Prioridade máxima MS |
+
+---
+
+**Documento gerado em:** `r Sys.time()`
+
+---
+
+# Notas Metodológicas Importantes {.tabset}
+
+## Entendendo os Indicadores de Vigilância
+
+### **O que significa cada indicador do Eixo de Vigilância?**
+
+O sistema de vigilância epidemiológica para sarampo e rubéola funciona como um **sistema de alarme**: precisa detectar casos rapidamente, investigá-los adequadamente e coletar amostras para confirmação laboratorial. Cada um dos 5 indicadores avalia uma etapa crítica desse processo.
+
+---
+
+### **Indicador 1: Taxa de Notificação**
+
+**O que é:**  
+Meta mínima de casos suspeitos que cada município deveria notificar:
+- Municípios com ≥100.000 habitantes: pelo menos **2 casos por 100.000 habitantes**
+- Municípios com <100.000 habitantes: pelo menos **1 caso notificado**
+
+**Por que é importante:**  
+Em um país em fase de eliminação, ainda esperamos alguns casos suspeitos (que podem ser outros exantemas virais, reações vacinais, ou importações). Uma taxa **muito baixa** ou **zero notificações** pode indicar:
+- Sistema de vigilância pouco sensível (não está detectando)
+- Profissionais de saúde não notificando casos suspeitos
+- Subnotificação
+
+**Como pontua:**
+- ✅ **0 pontos** = Município atingiu a meta de notificação
+- ⚠️ **1 ponto** = Município NÃO atingiu a meta (possível subnotificação)
+
+**Situação no Brasil:**
+- **98% dos municípios (5.455)** não atingem a meta de notificação
+- Apenas **2% (116 municípios)** têm taxa adequada
+- **Achado crítico:** Sugere subnotificação massiva ou baixa sensibilidade do sistema nacional
+
+---
+
+### **Indicador 2: Investigação Oportuna**
+
+**O que é:**  
+Porcentagem de casos suspeitos que foram investigados em **até 48 horas** após a notificação.
+
+**Por que é importante:**  
+Sarampo e rubéola são altamente contagiosos. A investigação rápida permite:
+- Identificar contatos e vacinação de bloqueio
+- Prevenir surtos
+- Coletar informações enquanto ainda estão "frescas"
+
+**Como pontua:**
+- ✅ **0 pontos** = ≥80% dos casos investigados em ≤48h
+- ⚠️ **1 ponto** = <80% dos casos investigados oportunamente
+- ℹ️ **0 pontos** = Sem notificações suficientes para calcular (não penaliza)
+
+---
+
+### **Indicador 3: Coleta Oportuna de Amostra**
+
+**O que é:**  
+Porcentagem de casos em que amostra de sangue foi coletada em **até 30 dias** do início do exantema.
+
+**Por que é importante:**  
+O diagnóstico laboratorial (sorologia) só funciona se a amostra for coletada no período correto:
+- Muito cedo: ainda não há anticorpos
+- Muito tarde: anticorpos podem ter diminuído
+- Janela ideal: 1-30 dias após o exantema
+
+**Como pontua:**
+- ✅ **0 pontos** = ≥80% coletadas oportunamente
+- ⚠️ **1 ponto** = <80% coletadas oportunamente
+- ℹ️ **0 pontos** = Sem notificações suficientes (não penaliza)
+
+---
+
+### **Indicador 4: Qualidade da Investigação**
+
+**O que é:**  
+Porcentagem de fichas de investigação com **pelo menos 8 dos 11 campos essenciais** preenchidos.
+
+**Por que é importante:**  
+Uma investigação incompleta dificulta:
+- Classificação adequada do caso (confirmado vs descartado)
+- Identificação da fonte de infecção
+- Rastreamento de contatos
+- Análise epidemiológica para tomada de decisão
+
+**Campos essenciais incluem:** data do exantema, histórico vacinal, sintomas, contatos, fonte de infecção, etc.
+
+**Como pontua:**
+- ✅ **0 pontos** = ≥80% das investigações adequadas
+- ⚠️ **1 ponto** = <80% das investigações adequadas
+- ℹ️ **0 pontos** = Sem notificações suficientes (não penaliza)
+
+---
+
+### **Indicador 5: Encerramento Laboratorial**
+
+**O que é:**  
+Porcentagem de casos que tiveram **resultado laboratorial** (sorologia, PCR ou isolamento viral).
+
+**Por que é importante:**  
+Para manter a certificação de eliminação, **TODO caso suspeito** precisa ser confirmado ou descartado laboratorialmente. Não podemos confiar apenas em critérios clínicos.
+
+**Sem resultado laboratorial:**
+- Não sabemos se era realmente sarampo/rubéola
+- Pode haver transmissão silenciosa não detectada
+- Compromete a certificação de eliminação
+
+**Como pontua:**
+- ✅ **0 pontos** = ≥80% dos casos com resultado laboratorial
+- ⚠️ **1 ponto** = <80% dos casos com resultado laboratorial
+- ℹ️ **0 pontos** = Sem notificações suficientes (não penaliza)
+
+---
+
+## Interpretação do VIG_SCORE
+
+### **O que significa cada pontuação?**
+
+O **VIG_SCORE** (0-5 pontos) resume a **qualidade do sistema de vigilância** do município **quando há notificações**:
+
+| Score | Classificação (Mapa 3) | O que significa | Ação recomendada |
+|-------|------------------------|-----------------|------------------|
+| **0-1** | ✅ Baixo risco (Verde) | Sistema funcionando bem | Manutenção |
+| **2** | ⚠️ Médio risco (Amarelo) | 2 indicadores com problema | Monitoramento |
+| **3-5** | 🚨 Alto risco (Laranja) | 3+ indicadores ruins | Intervenção urgente |
+| **---** | **⚪ Silêncio (Cinza)** | **ZERO notificações** | **Investigação ativa** |
+
+**⚠️ ATENÇÃO:** Municípios com **ZERO notificações** são classificados como **"Silêncio Epidemiológico" (CINZA)** independente do VIG_SCORE, porque:
+- Não sabemos se realmente não há casos
+- OU se o sistema simplesmente não está detectando
+- Requerem investigação ativa para esclarecer
+
+---
+
+### **Exemplos práticos:**
+
+**Exemplo 1: Município com Classificação BAIXO RISCO (Verde)**
+```
+✅ Taxa de notificação adequada (≥2/100k) - TEM notificações
+✅ ≥80% investigados em 48h
+✅ ≥80% amostras coletadas oportunamente
+✅ ≥80% investigações completas
+✅ ≥80% com resultado laboratorial
+→ VIG_SCORE = 0 | Sistema funcionando perfeitamente!
+```
+
+**Exemplo 2: Município com Classificação MÉDIO RISCO (Amarelo)**
+```
+⚠️ Taxa de notificação baixa (vig_1 = 1) - mas TEM notificações
+✅ Investigação oportuna OK
+⚠️ Coleta fora do prazo (vig_3 = 1)
+✅ Investigação adequada OK
+✅ Encerramento laboratorial OK
+→ VIG_SCORE = 2 | Precisa melhorar detecção e coleta de amostras
+```
+
+**Exemplo 3: Município com Classificação ALTO RISCO (Laranja)**
+```
+✅ Taxa de notificação OK - está detectando
+⚠️ Demora para investigar (>48h)
+⚠️ Coleta amostras fora do prazo
+⚠️ Investigações incompletas
+⚠️ Poucos resultados laboratoriais
+→ VIG_SCORE = 4 | Detecta mas NÃO responde adequadamente!
+```
+
+**Exemplo 4: Município com SILÊNCIO EPIDEMIOLÓGICO (Cinza)** ⚠️
+```
+⚪ ZERO notificações nos últimos 5 anos
+❓ Não sabemos se:
+   - Realmente não houve casos (bom)
+   - OU sistema não está detectando (ruim)
+→ Classificação: SILÊNCIO (cinza) | Requer investigação ativa!
+```
+
+**Importante:** O Exemplo 4 mostra por que silêncio NÃO pode ser "baixo risco":
+- VIG_SCORE seria 1 (só vig_1 pontua)
+- MAS não temos como saber se o sistema funciona
+- É um "ponto de interrogação" que precisa ser investigado
+
+---
+
+## Sobre "Silêncio Epidemiológico"
+
+### **⚠️ MUDANÇA IMPORTANTE: Como a Vigilância é Classificada**
+
+**Neste relatório, municípios SEM notificações são tratados de forma especial:**
+
+#### **No Mapa 3 (Vigilância Epidemiológica):**
+
+Municípios são classificados em:
+
+1. **Verde (Baixo risco):** VIG_SCORE 0-1 + tem notificações
+2. **Amarelo (Médio risco):** VIG_SCORE 2 + tem notificações  
+3. **Laranja (Alto risco):** VIG_SCORE 3-4 + tem notificações
+4. **Vermelho (Altíssimo risco):** VIG_SCORE 5 + tem notificações
+5. **CINZA (Não classificável):** ZERO notificações = sem dados para avaliar qualidade
+
+**Justificativa:** 
+
+Um município com **zero notificações** não pode ser classificado como "baixo risco" de vigilância porque:
+- Não temos dados para avaliar a qualidade das investigações
+- Não sabemos se é eliminação real OU subnotificação
+- Sistema pode estar "cego" para casos existentes
+
+Por isso, municípios silenciosos **não entram** na distribuição de risco de vigilância - eles aparecem em **CINZA** e são analisados separadamente no **Mapa 9**.
+
+---
+
+#### **No Mapa 9 (Silêncio Epidemiológico com Fatores de Risco):**
+
+Municípios SEM notificações são **estratificados** por fatores que aumentam a preocupação:
+
+| Categoria | Significado | Nível de preocupação |
+|-----------|-------------|---------------------|
+| **Silêncio + Turismo** | Sem notificação + município turístico | 🔴 Muito alto |
+| **Silêncio + Vulnerabilidade** | Sem notificação + alta vulnerabilidade social | 🔴 Alto |
+| **Silêncio + Grupos Vulneráveis** | Sem notificação + indígenas/quilombolas | 🟠 Alto |
+| **Silêncio Simples** | Sem notificação, sem fatores adicionais | 🟡 Moderado |
+
+**Priorização:**
+- Municípios em **vermelho escuro** (Silêncio + Turismo) = prioridade máxima para investigação ativa
+- Municípios em **amarelo** (Silêncio Simples) = monitoramento de rotina
+
+---
+
+### **O que é silêncio epidemiológico?**
+
+"Silêncio epidemiológico" refere-se a municípios com:
+
+1. **ZERO notificações** de casos suspeitos de sarampo/rubéola (em 5 anos)
+2. **Contexto de risco** que sugere que deveriam ter ao menos alguns casos suspeitos
+
+**Total de municípios em silêncio no Brasil:** [ver Mapa 9]
+
+---
+
+### **Por que o silêncio é preocupante?**
+
+Um município **sem nenhuma notificação** pode indicar duas situações opostas:
+
+#### **Cenário Positivo (Eliminação Real):**
+✅ Realmente não houve casos suspeitos  
+✅ Sistema de vigilância funcionando  
+✅ Eliminação mantida com sucesso
+
+#### **Cenário Negativo (Subnotificação):**
+⚠️ Casos existem mas não estão sendo detectados  
+⚠️ Sistema de vigilância "cego" (baixa sensibilidade)  
+⚠️ Profissionais não suspeitam/notificam  
+⚠️ Transmissão silenciosa possível
+
+**O problema:** Não conseguimos distinguir entre os dois cenários sem **investigação ativa**!
+
+---
+
+### **Silêncio ≠ Taxa de notificação inadequada**
+
+Esses são **conceitos diferentes** que avaliam problemas distintos:
+
+#### **Taxa de Notificação Inadequada (vig_1):**
+- Município **TEM notificações**, mas abaixo da meta
+- Exemplo: 50 notif em cidade de 500k hab = 10/100k (meta é ≥2/100k)
+- **Problema:** Detecção insuficiente, mas pelo menos **algo está sendo notificado**
+- **Pontuação:** 1 ponto no VIG_SCORE
+
+#### **Silêncio Epidemiológico (Mapa 9):**
+- Município tem **ZERO notificações**
+- Exemplo: 0 notif em município turístico de fronteira
+- **Problema:** Ausência **total** de notificações pode indicar sistema completamente inoperante
+- **Tratamento:** Categoria separada (CINZA), requer investigação qualitativa
+
+**Importante:** Um município pode ter taxa adequada (vig_1 = 0) mas ainda assim estar em "médio" ou "alto" risco de vigilância se os outros indicadores (investigação, coleta, etc) estiverem ruins.
+
+---
+
+### **O que fazer com municípios silenciosos?**
+
+Municípios em silêncio epidemiológico requerem **abordagem diferente** da rotina:
+
+#### **Investigação Ativa:**
+1. **Busca retrospectiva:** revisar prontuários dos últimos 2-3 anos em busca de casos não notificados
+2. **Entrevistas:** contatar unidades de saúde, laboratórios, hospitais
+3. **Verificação de exantemas:** levantar casos de "virose exantemática" não investigados
+
+#### **Fortalecimento do Sistema:**
+1. **Capacitação:** treinar profissionais sobre definição de caso suspeito
+2. **Sensibilização:** campanhas educativas sobre sinais/sintomas
+3. **Simplificação:** facilitar fluxo de notificação
+4. **Feedback:** retornar informações aos profissionais que notificarem
+
+#### **Priorização:**
+- **Silêncio + Turismo:** investigação ativa IMEDIATA (alto risco de caso importado)
+- **Silêncio + Vulnerabilidade:** apoio técnico intensificado
+- **Silêncio Simples:** monitoramento de rotina
+
+**Princípio fundamental:** **Nunca assumir** que silêncio = ausência de doença sem investigação!
+
+---
+
+### **Impacto na Certificação de Eliminação**
+
+Para manter a certificação de eliminação, o Brasil precisa demonstrar:
+
+1. ✅ **Cobertura vacinal adequada** (Eixo VC)
+2. ✅ **Sistema de vigilância sensível** (Eixo VIG)
+3. ✅ **Capacidade de detectar casos* (Eixo PIC)
+
+**Municípios em silêncio** representam uma **vulnerabilidade** porque:
+- Podem ter transmissão não detectada
+- Casos de sarampo podem passar despercebidas
+- Comprometem a credibilidade do sistema nacional
+
+**Recomendação:** Reduzir gradualmente o número de municípios em silêncio através de:
+- Capacitação em larga escala
+- Busca ativa sistemática
+- Fortalecimento da atenção primária
+
+---
+
+## Mudança Importante na Metodologia
+
+### **Correção aplicada neste relatório**
+
+**⚠️ ATENÇÃO:** Este relatório utiliza uma metodologia **corrigida** em relação a versões anteriores.
+
+---
+
+### **O que mudou?**
+
+**ANTES (versão anterior - incorreta):**
+```r
+vig_1_ind = as.numeric(class_silent)
+```
+- Usava variável `class_silent`
+- Só aplicável a municípios com >100.000 habitantes
+- 3.566 municípios pequenos ficavam com NA → convertiam para 0 pontos
+- **Resultado:** Subestimava o problema de vigilância
+
+**DEPOIS (versão atual - correta):**
+```r
+vig_1_ind baseado em class_notification
+```
+- Usa variável `class_notification`
+- Aplicável a **TODOS os 5.571 municípios**
+- Meta ajustada ao tamanho populacional
+- **Resultado:** Reflete a realidade nacional
+
+---
+
+### **Impacto da correção**
+
+| Métrica | Antes (incorreto) | Depois (correto) |
+|---------|-------------------|------------------|
+| Municípios com vig_1 = 0 | ~3.566 | 116 |
+| Municípios com vig_1 = 1 | ~1.889 | 5.455 |
+| % com taxa inadequada | ~34% | **98%** |
+
+**Interpretação:**
+- A correção revela que **98% dos municípios brasileiros** não atingem a meta de notificação
+- Isso é um **achado crítico** que deve ser reportado
+- Sugere **subnotificação massiva** ou **baixa sensibilidade** do sistema nacional
+- **NÃO é erro:** é a realidade que estava sendo mascarada
+
+---
+
+### **Por que isso é importante para a certificação de eliminação?**
+
+Para manter a certificação de eliminação do sarampo e rubéola, o Brasil precisa:
+
+1. ✅ **Cobertura vacinal ≥95%** (Eixo VC)
+2. ✅ **Capacidade de detectar casos* (Eixo PIC)
+3. ✅ **Sistema de vigilância sensível e oportuno** (Eixo VIG) ⚠️
+
+**Achado crítico:** Com 98% dos municípios não atingindo meta de notificação, há risco de:
+- Casos circulando sem detecção
+- Surtos não identificados precocemente
+- Perda da certificação
+
+**Recomendação:** Fortalecimento urgente do sistema de vigilância nacional, com foco em:
+- Sensibilização de profissionais de saúde
+- Capacitação em suspeição clínica
+- Melhoria dos fluxos de notificação
+- Investigação ativa em áreas prioritárias
+
+---
+
+## Perguntas Frequentes
+
+### **1. Por que município sem notificações não recebe pontos em vig_2, vig_3, vig_4 e vig_5?**
+
+**Resposta:** Porque esses indicadores medem a **qualidade da resposta** quando há casos notificados. Se não há notificações:
+- Não há investigações para avaliar (vig_2)
+- Não há amostras para avaliar (vig_3, vig_5)
+- Não há fichas para avaliar (vig_4)
+
+Penalizar pela ausência de dados seria **dupla penalização**:
+- Já foi penalizado em vig_1 (taxa de notificação inadequada)
+- Penalizar de novo em vig_2-5 seria injusto
+
+---
+
+### **2. Um município com VIG_SCORE = 1 é realmente de "baixo risco"?**
+
+**Depende!** VIG_SCORE = 1 pode significar:
+
+**Cenário A:** Taxa de notificação baixa, mas quando detecta, investiga bem
+- Problema: **DETECÇÃO** (sensibilidade)
+- Risco: Casos podem passar despercebidos
+- Ação: Melhorar sensibilização profissional
+
+**Cenário B:** Taxa adequada, mas 1 outro indicador ruim
+- Problema: **RESPOSTA** (oportunidade ou qualidade)
+- Risco: Casos detectados mas mal investigados
+- Ação: Melhorar processos de investigação
+
+**O score VIG sozinho não determina risco total** - por isso combinamos com VC e PIC!
+
+---
+
+### **3. Por que tantos municípios têm VIG_SCORE alto?**
+
+**Resposta:** Reflete a **realidade do sistema de vigilância brasileiro**:
+
+1. **98% não atingem meta de notificação** (vig_1 = 1 para quase todos)
+2. **Dos que notificam, muitos têm qualidade ruim:**
+   - Investigação não oportuna (>48h)
+   - Amostras fora do prazo (>30 dias)
+   - Fichas incompletas
+   - Sem resultado laboratorial
+
+**Isso NÃO é erro metodológico** - é **achado epidemiológico crítico** que precisa ser:
+- Reportado às autoridades
+- Usado para priorizar fortalecimento da vigilância
+- Monitorado ao longo do tempo
+
+---
+
+### **4. Municípios pequenos/rurais são injustamente penalizados?**
+
+**Não!** A meta é **ajustada ao tamanho**:
+- Municípios grandes (≥100k): precisam ≥2 notificações/100k hab
+- Municípios pequenos (<100k): precisam **apenas 1 notificação**
+
+Exemplo:
+- Município de 5.000 habitantes: meta = **1 notificação**
+- Município de 500.000 habitantes: meta = **1.000 notificações**
+
+Se um município de 5 mil habitantes não tem **nem 1 notificação** em 5 anos, isso levanta suspeitas de subnotificação (a não ser que seja extremamente isolado).
+
+---
+
+### **5. Como usar este relatório na prática?**
+
+**Para gestores municipais:**
+1. Buscar seu município na Tabela 3 (Vigilância)
+2. Ver score e quais indicadores estão ruins
+3. Priorizar ações conforme os indicadores problemáticos
+
+**Para gestores estaduais:**
+1. Usar Mapa 3 para identificar municípios com VIG_SCORE alto
+2. Priorizar apoio técnico e capacitação
+3. Investigar ativamente municípios em silêncio epidemiológico
+
+**Para nível federal:**
+1. Reconhecer que 98% dos municípios não atingem meta de notificação
+2. Implementar estratégia nacional de fortalecimento da vigilância
+3. Revisar se as metas são realistas ou precisam ajuste
+4. Investir em capacitação em larga escala
+
+---
+
+## Referências Técnicas
+
+### **Base conceitual dos indicadores**
+
+Todos os indicadores utilizados neste relatório são baseados em:
+
+1. **Guia de Vigilância em Saúde - Ministério da Saúde (Brasil)**
+2. **Manual de Vigilância Epidemiológica de Eventos Adversos Pós-Vacinação**
+3. **Plano de Ação para Manutenção da Eliminação do Sarampo, Rubéola e SRC**
+4. **OPAS/OMS - Documentos técnicos sobre eliminação de sarampo nas Américas**
+
+### **Metas e critérios**
+
+- Taxa de notificação: ≥2 casos/100.000 hab ou ≥1 caso total
+- Investigação oportuna: ≥80% em ≤48 horas
+- Coleta oportuna: ≥80% em ≤30 dias do exantema
+- Investigação adequada: ≥80% com ≥8/11 campos essenciais
+- Encerramento laboratorial: ≥80% com resultado
+
+### **Período de análise**
+
+- Dados: 2020-2024 (5 anos)
+- Data de corte: Última atualização disponível nas bases nacionais
+
+---
+
+*Relatório gerado em: `r format(Sys.time(), '%d/%m/%Y %H:%M')`*
+
+*Para dúvidas metodológicas, entre em contato com a equipe técnica responsável.*
+
+
