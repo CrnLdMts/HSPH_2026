@@ -1741,7 +1741,10 @@ Todos os indicadores utilizados neste relatório são baseados em:
 
 *Relatório gerado em: `r format(Sys.time(), '%d/%m/%Y %H:%M')`*
 
-*Para dúvidas metodológicas, entre em contato com a equipe técnica responsável.*
+*Esse é um projeto desenvolvido no curso - Harvard-Brazil Collaborative Public Health Field Course, em janeiro de 2026. Cabe ao grupo a autoria e direitos: Bianca de Melo Guedes; Carina Leão de Matos; Mia Patzakis; Pedro Julien Salvarani Borges; Pun Chevasutho e Thiago Sanches Brumatti.*
+
+*Para dúvidas metodológicas, entre em contato com a equipe técnica responsável. E-mail: tsbrumatti@saude.sp.gov.br*
 
 *Para dúvidas em relação ao código, entre em contato com Carina Leão de Matos. E-mail: carinamatos.svs@gmail.com*
+
 
