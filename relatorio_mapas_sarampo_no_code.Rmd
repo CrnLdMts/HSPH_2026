@@ -1561,52 +1561,6 @@ Para manter a certificação de eliminação, o Brasil precisa demonstrar:
 
 ---
 
-## Mudança Importante na Metodologia
-
-### **Correção aplicada neste relatório**
-
-**⚠️ ATENÇÃO:** Este relatório utiliza uma metodologia **corrigida** em relação a versões anteriores.
-
----
-
-### **O que mudou?**
-
-**ANTES (versão anterior - incorreta):**
-```r
-vig_1_ind = as.numeric(class_silent)
-```
-- Usava variável `class_silent`
-- Só aplicável a municípios com >100.000 habitantes
-- 3.566 municípios pequenos ficavam com NA → convertiam para 0 pontos
-- **Resultado:** Subestimava o problema de vigilância
-
-**DEPOIS (versão atual - correta):**
-```r
-vig_1_ind baseado em class_notification
-```
-- Usa variável `class_notification`
-- Aplicável a **TODOS os 5.571 municípios**
-- Meta ajustada ao tamanho populacional
-- **Resultado:** Reflete a realidade nacional
-
----
-
-### **Impacto da correção**
-
-| Métrica | Antes (incorreto) | Depois (correto) |
-|---------|-------------------|------------------|
-| Municípios com vig_1 = 0 | ~3.566 | 116 |
-| Municípios com vig_1 = 1 | ~1.889 | 5.455 |
-| % com taxa inadequada | ~34% | **98%** |
-
-**Interpretação:**
-- A correção revela que **98% dos municípios brasileiros** não atingem a meta de notificação
-- Isso é um **achado crítico** que deve ser reportado
-- Sugere **subnotificação massiva** ou **baixa sensibilidade** do sistema nacional
-- **NÃO é erro:** é a realidade que estava sendo mascarada
-
----
-
 ### **Por que isso é importante para a certificação de eliminação?**
 
 Para manter a certificação de eliminação do sarampo e rubéola, o Brasil precisa:
@@ -1720,9 +1674,10 @@ Se um município de 5 mil habitantes não tem **nem 1 notificação** em 5 anos,
 Todos os indicadores utilizados neste relatório são baseados em:
 
 1. **Guia de Vigilância em Saúde - Ministério da Saúde (Brasil)**
-2. **Manual de Vigilância Epidemiológica de Eventos Adversos Pós-Vacinação**
-3. **Plano de Ação para Manutenção da Eliminação do Sarampo, Rubéola e SRC**
-4. **OPAS/OMS - Documentos técnicos sobre eliminação de sarampo nas Américas**
+2. **Fascículo Indicadores de Qualidade das Doenças Exantemáticas - Ministério da Saúde (Brasil)**
+3. **Manual de Vigilância Epidemiológica de Eventos Adversos Pós-Vacinação**
+4. **Plano de Ação para Manutenção da Eliminação do Sarampo, Rubéola e SRC**
+5. **OPAS/OMS - Documentos técnicos sobre eliminação de sarampo nas Américas**
 
 ### **Metas e critérios**
 
@@ -1746,5 +1701,3 @@ Todos os indicadores utilizados neste relatório são baseados em:
 *Para dúvidas metodológicas, entre em contato com a equipe técnica responsável. E-mail: tsbrumatti@saude.sp.gov.br*
 
 *Para dúvidas em relação ao código, entre em contato com Carina Leão de Matos. E-mail: carinamatos.svs@gmail.com*
-
-
